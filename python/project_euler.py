@@ -407,6 +407,97 @@ def find_amicable_nums(limit):
 
     return amicables
 
+def calc_score(name):
+    #we are going to use ascii conversion
+    #lowercase!!
+    name = name.lower()
+
+    def convert_score(char):
+        #96 because we want a 1-based score (e.g. a = 1, b = 2, etc)
+        return ord(char) - 96
+
+    return sum(map(convert_score, list(name)))
+
+def names_scores(data):
+    #get alpha sort
+    sorted_data = sorted(data)
+
+    #get scores
+    scores = 0
+
+    for i, x in enumerate(sorted_data):
+        score = (i + 1) * calc_score(x)
+        scores += score
+
+    return scores
+
+def non_abundant_sums():
+    #by definition
+    upper_limit = 28123
+    abun_nums = set()
+    sum_abun_nums = set()
+    non_sum_abun_nums = set()
+
+    for x in range(1, upper_limit):
+        #figure out abun
+        x_div = get_divisors(x, remove_self=True)
+        x_div_sum = sum(x_div)
+
+        if x_div_sum > x:
+            abun_nums.add(x)
+
+            #add all possible abun_sum combos
+            for num in abun_nums:
+                sum_abun_nums.add(x+num)
+        if x not in sum_abun_nums:
+            non_sum_abun_nums.add(x)
+
+    return non_sum_abun_nums
+
+def get_factorial_base(n):
+    num = n
+    divisor = 1
+    fact_base = []
+    while num > 0:
+        fact_base.append(num % divisor)
+        num //= divisor
+        divisor += 1
+    fact_base.reverse()
+
+    return fact_base
+
+def get_xth_lexicographical_perm(x, num_seq):
+    fact_base = get_factorial_base(x)
+    seq = num_seq
+    if len(seq) > len(fact_base):
+        diff = len(seq) - len(fact_base)
+        fact_base.extend([0]*diff)
+    pos = 0
+    perm = []
+    while seq:
+        perm.append(seq.pop(fact_base[pos]))
+        pos += 1
+
+    return perm
+
+def special_fib(digit_size):
+    a, b = 0, 1
+    count = 0
+    while a <= digit_size:
+        a, b = b, a + b
+        count += 1
+
+    return count, a
+
+def recurring_decimal(L):
+    for d in list(primes_sieve2(L))[::-1]:
+        period = 1
+        while pow(10, period, d) != 1:
+            period += 1
+        if d - 1 == period:
+            break
+
+    return d
 
 
 
