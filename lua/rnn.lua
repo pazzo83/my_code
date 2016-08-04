@@ -35,7 +35,15 @@ end
 local function vecexp(m)
   local cp = m:copy()
   for i = 1,#cp do
-    cp[i] = math.exp(cp[i])
+    cp[i] = math.exp(m[i])
+  end
+  return cp
+end
+
+local function vec_tanh(m)
+  local cp = m:copy()
+  for i = 1,#cp do
+    cp[i] = math.tanh(m[i])
   end
   return cp
 end
@@ -75,6 +83,115 @@ end
 
 LuaRNN.onesMat = function(n, d)
   return LuaRNN.Mat(n, d, ones(n, d), alg.mat(n, d))
+end
+
+LuaRNN.Graph = class("Graph")
+function LuaRNN.Graph:initialize(backpropNeeded)
+  if backpropNeeded is "undefined" then
+    backpropNeeded = true
+  end
+
+  self.doBackprop = backpropNeeded
+  self.backprop = {}
+end
+
+LuaRNN.Graph:backprop = function()
+  for i = #self.backprop,1,-1 do
+    self.backprop[i]()
+  end
+end
+
+LuaRNN.Graph:rowpluck = function(m, ix)
+  -- pluck a row of m and return it as a column vector
+  local out = LuaRNN.Mat(m.d, 1)
+  for i = 1,#m.d do
+    out.w[{i, 1}] = m.w[{ix, i}]
+  end
+  if self.doBackprop then
+    local k = function()
+      for i = 1,#m.d do
+        m.dw[{ix, i}] = m.dw[{ix, i}] + out.dw[{i, 1}]
+      end
+    end
+    table.insert(self.backprop, k)
+  end
+  return out
+end
+
+LuaRNN.Graph:concat = function(...)
+  local n = 0
+  local mats = {...}
+  for i = 1,#mats do
+    n = n + mats[i].n
+  end
+  out = LuaRNN.Mat(n, mats[1].d, alg.mat(n, mats[1].d), alg.mat(n, mats[1].d))
+  n = 0
+  for i = 1,#mats do
+    m = mats[i]
+    for j = 1,m.n do
+      for k = 1,m.d do
+        out.w[{j + n, k}] = m.w[j, k]
+      end
+    end
+    n = n + m.n
+  end
+
+  if self.doBackprop then
+    local fun = function()
+      local n = 0
+      for _, m in ipairs(mats) do
+        for j = 1,m.n do
+          for k = 1,m.d do
+            m.dw[{j, k}] = out.dw[{j + n, k}]
+          end
+        end
+        n = n + m.n
+      end
+    end
+    table.insert(self.backprop, fun)
+  end
+  return out
+end
+
+LuaRNN.Graph:tanh = function(m)
+  local out = LuaRNN.Mat(m.n, m.d)
+  out.w = vec_tanh(m.w)
+  if self.doBackprop then
+    local k = function()
+      for i = 1,m.n do
+        for j = 1,m.d do
+          m.dw[{i, j}] = m.dw[{i, j}] + (1 - math.pow(out.w[{i, j}], 2) * out.dw[i, j]
+        end
+      end
+    end
+    table.insert(self.backprop, k)
+  end
+
+  return out
+end
+
+LuaRNN.Graph:sigmoid = function(m)
+  local dw = alg.mat(m.n, m.d)
+  for i = 1,m.n do
+    for j = 1,m.d do
+      dw[{i, j}] = 1.0 / (1.0 + math.exp(-m.w[{i, j}]))
+    end
+  end
+  local out = LuaRNN.Mat(m.n, m.d, dw, alg.mat(m.n, m.d))
+
+  if self.doBackprop then
+    local k = function()
+      for i = 1,m.n do
+        for j = 1,m.d do
+          m.dw[{i, j}] = m.dw[{i, j}] + out.w[{i, j}] * (1 - out.w[{i, j}]) * out.dw[{i, j}]
+        end
+      end
+    end
+
+    table.insert(self.backprop, k)
+  end
+
+  return out
 end
 
 -- LSTM Stuff
