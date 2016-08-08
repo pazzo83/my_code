@@ -194,6 +194,127 @@ LuaRNN.Graph:sigmoid = function(m)
   return out
 end
 
+LuaRNN.Graph:relu = function(m)
+  local out = LuaRNN.Mat(m.n, m.d)
+  for i = 1,m.n do
+    for j = 1,m.d do
+      if m.w[{i, j}] < 0 then
+        out.w[{i, j}] = 0
+      else
+        out.w[{i, j}] = m.w[{i, j}]
+      end
+    end
+  end
+
+  if self.doBackprop then
+    local k = function()
+      for i = 1,m.n do
+        for j = 1,m.d do
+          if m.w[{i, j}] >= 0 then
+            m.dw[{i, j}] = m.dw[{i, j}] + out.dw[{i, j}]
+          end
+        end
+      end
+    end
+
+    table.insert(self.backprop, k)
+  end
+
+  return out
+end
+
+LuaRNN.Graph:mul = function(m1, m2)
+  if type(m2) == "number" then
+    local out = LuaRNN.Mat(m1.n, m1.d, m.w[] * m2, alg.mat(m1.n, m1.d))
+  else
+    local out = LuaRNN.Mat(m1.n, m2.d, m1.w[] * m2.w[], alg.mat(m1.n, m2.d))
+  end
+
+  if self.doBackprop then
+    if type(m2) == "number" then
+      local k = function()
+        m.dw[] = m.dw[] + out.dw[] * m2
+      end
+    else
+      local k = function()
+        for i = 1,m1.n do
+          for j = 1,m1.d do
+            b = out.dw[{i, j}]
+            for x = 1,m1.d do
+              m1.dw[{i, x}] = m1.dw[{i, x}] + m2.w[{x, j}] * b
+              m2.dw[{x, j}] = m2.dw[{x, j}] + m1.w[{i, x}] * b
+            end
+          end
+        end
+      end
+    end
+
+    table.insert(self.backprop, k)
+  end
+
+  return out
+end
+
+LuaRNN:Graph:add = function(...)
+  local mats = {...}
+
+
+  if type(mats[2]) ~= "number" then
+    local out = LuaRNN.Mat(mats[1].n, mats[1].d, alg.mat(mats[1].n, mats[1].d), alg.mat(mats[1].n, mats[1].d))
+    for i = 1,#mats do
+      m = mats[i]
+      for x = 1,m.n do
+        for y = 1,m.d do
+          out.w[{x, y}] = out.w[{x, y}] + m.w[{x, y}]
+        end
+      end
+    end
+  else
+    local out = LuaRNN.Mat(mats[1].n, mats[1].d, mats[1].w + mats[2])
+  end
+
+  if self.doBackprop then
+    if type(mats[2]) == "number" then
+      local k = function()
+        m[1].dw[] = m[1].dw[] + out.dw[]
+      end
+    else
+      local k = function()
+        for i = 1,#mats do
+          m = mats[i]
+          for x = 1,m.n do
+            for y = 1,m.d do
+              m.dw[{x, y}] = m.dw[{x, y}] + out.dw[{x, y}]
+            end
+          end
+        end
+      end
+    end
+
+    table.insert(self.backprop, k)
+  end
+
+  return out
+end
+
+LuaRNN.Graph:eltmul = function (m1, m2)
+  local out = LuaRNN.Mat(m1.n, m2.d, m1.w[] * m2.w[], alg.mat(m1.n, m2.d))
+  if self.doBackprop then
+    local k = function()
+      for i = 1,m1.n do
+        for j = 1,m1.d do
+          m1.dw[{i, j}] = m1.dw[{i, j}] + m2.w[{i, j}] * out.dw[{i, j}]
+          m2.dw[{i, j}] = m2.dw[{i, j}] + m1.w[{i, j}] * out.dw[{i, j}]
+        end
+      end
+    end
+
+    table.insert(self.backprop, k)
+  end
+
+  return out
+end
+
 -- LSTM Stuff
 LuaRNN.LSTMLayer = class("LSTMLayer")
 function LuaRNN.LSTMLayer:initialize(prevsize, hiddensize, std)
