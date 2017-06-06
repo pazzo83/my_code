@@ -1,10 +1,14 @@
-abstract type NamedTuple end
+abstract type NamedTable end
 
 struct ParseNode{T} end
 
+escape( e::Expr ) = esc( e )
 escape(e) = e
 
 function trans(::Union{Type{ParseNode{:(=)}}, Type{ParseNode{:kw}}}, expr::Expr)
+  if ~(isa(expr.args[2], Expr)) || ~(isa(expr.args[2].args, Vector))
+    throw(ArgumentError("must initialize with a vector"))
+  end
   sym, typ = trans(expr.args[1])
   return (sym, typ, escape(expr.args[2]))
 end
@@ -25,7 +29,7 @@ function trans(sym::Symbol)
   return (sym, nothing, nothing)
 end
 
-function gen_namedtuple_ctor_body(n::Int, args)
+function gen_namedtable_ctor_body(n::Int, args)
   types = [ :(typeof($x)) for x in args ]
   cnvt = [ :(convert(fieldtype(TT, $x), $(args[x]))) for x = 1:n ]
   if n == 0
@@ -35,6 +39,14 @@ function gen_namedtuple_ctor_body(n::Int, args)
   end
   tcond = :(isa(NT, UnionAll))
   quote
+    if $n > 1
+      len = length(args[1])
+      for x in args[2:end]
+        if length(x) != len
+          throw(ArgumentError("Row mismatch"))
+        end
+      end
+    end
     if $tcond
       TT = $texpr
     else
@@ -48,13 +60,13 @@ function gen_namedtuple_ctor_body(n::Int, args)
   end
 end
 
-@generated function (::Type{NT}){NT <: NamedTuple}(args...)
+@generated function (::Type{NT}){NT <: NamedTable}(args...)
   n = length(args)
   aexprs = [ :(args[$i]) for i = 1:n ]
-  return gen_namedtuple_ctor_body(n, aexprs)
+  return gen_namedtable_ctor_body(n, aexprs)
 end
 
-function create_namedtuple_type(fields::Vector{Symbol})
+function create_namedtable_type(fields::Vector{Symbol})
   mod = current_module()
   escaped_fieldnames = [replace(string(i), "_", "__") for i in fields]
   name = Symbol( string("_NT_", join(escaped_fieldnames, "_")) )
@@ -62,14 +74,13 @@ function create_namedtuple_type(fields::Vector{Symbol})
     len = length(fields)
     types = [Symbol("T$n") for n = 1:len]
     tfields = [ Expr(:(::), Symbol( fields[n] ), Symbol( "T$n" )) for n = 1:len]
-    def = Expr(:type, true, Expr( :(<:), Expr(:curly, name, types...), GlobalRef(Main, :NamedTuple)), Expr(:block, tfields..., Expr(:tuple)))
-    println(def)
+    def = Expr(:type, true, Expr( :(<:), Expr(:curly, name, types...), GlobalRef(Main, :NamedTable)), Expr(:block, tfields..., Expr(:tuple)))
     eval(mod, def)
   end
   return getfield(mod, name)
 end
 
-function make_tuple(exprs::Vector)
+function make_table(exprs::Vector)
   len     = length(exprs)
   fields  = Array{Symbol}(len)
   values  = Array{Any}(len)
@@ -80,14 +91,16 @@ function make_tuple(exprs::Vector)
   for i in eachindex(exprs)
     expr = exprs[i]
     sym, typ, val = trans(expr)
-
+    if construct == true && val == nothing || ( i > 1 && construct == false && val != nothing)
+      error("Table must be initialized with vectors")
+    end
     construct = val != nothing
     fields[i] = sym != nothing ? sym : Symbol("_$(i)_")
     typs[i] = typ
     values[i] = ( typ != nothing ) ? Expr(:call, :convert, typ, val) : val
   end
 
-  ty = create_namedtuple_type(fields)
+  ty = create_namedtable_type(fields)
 
   if ~construct
     if len == 0
@@ -99,6 +112,6 @@ function make_tuple(exprs::Vector)
   end
 end
 
-macro NT(expr...)
-  return make_tuple(collect(expr))
+macro NTable(expr...)
+  return make_table(collect(expr))
 end
