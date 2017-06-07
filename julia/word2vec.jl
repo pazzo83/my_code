@@ -1,4 +1,5 @@
 using DataStructures
+using StatsFuns
 
 mutable struct Vocab
   vcount::Int
@@ -47,9 +48,10 @@ mutable struct Word2Vec
   syn1neg::Matrix{Float64}
   syn0_lockf::Vector{Float64}
   neglabels::Vector{Int}
+  random::MersenneTwister
 end
 
-function Word2Vec(sentences::Vector{Vector{String}}, sz::Int = 100, alpha::Float64 = 0.025, window::Int = 5, mincount::Int = 1, maxvocabsize::Int = -1,
+function Word2Vec(sentences::Vector{Vector{String}}, sz::Int = 100, alpha::Float64 = 0.025, window::Int = 1, mincount::Int = 1, maxvocabsize::Int = -1,
                   sample::Float64 = 1e-3, seed::Int = 1, workers::Int = 3, minalpha::Float64 = 0.0001, sg::Int = 0, hs::Int = 0, negative::Int = 5,
                   cbowmean::Int = 1, iterations::Int = 5, nullword::Int = 0, sortedvocab::Int = 1, batchwords::Int = 5)
 
@@ -65,10 +67,11 @@ function Word2Vec(sentences::Vector{Vector{String}}, sz::Int = 100, alpha::Float
   model_trimmed_post_training = false
   corpuscount = 0
   neglabels = Vector{Int}()
+  random = MersenneTwister(seed)
 
   return Word2Vec(sentences, sg, vectorsize, layer1size, alpha, alpha, window, maxvocabsize, seed, mincount, sample, workers,
                   minalpha, hs, negative, cbowmean, iterations, nullword, traincount, total_train_time, sortedvocab, batchwords, model_trimmed_post_training,
-                  corpuscount, rawvocab, wv, cumtable, syn1neg, syn0_lockf, neglabels)
+                  corpuscount, rawvocab, wv, cumtable, syn1neg, syn0_lockf, neglabels, random)
 end
 
 keep_vocab_item(w2v::Word2Vec, count::Int) = count >= w2v.mincount
@@ -232,13 +235,80 @@ function finalize_vocab!(w2v::Word2Vec)
   return w2v
 end
 
+function train_batch_cbow!(w2v::Word2Vec, sentences::Vector{Vector{String}}, alpha::Float64, work::Vector{Float64}, neu1::Vector{Float64})
+  result = 0
+  for sentence in sentences
+    wordvocabs = [w2v.wv.vocab[w] for w in sentence if haskey(w2v.wv.vocab, w) && w2v.wv.vocab[w].sampleint > rand(w2v.random) * 2 ^ 32]
+    for pos in eachindex(wordvocabs)
+      word = wordvocabs[pos]
+      reducedwindow = rand(w2v.random, 0:w2v.window-1)
+      _start = max(1, pos - w2v.window + reducedwindow)
+      iter = _start:(pos-1 + w2v.window - reducedwindow)
+      windowpos = zip(wordvocabs[iter], iter)
+      word2indices = [word2.vindex for (word2, pos2) in windowpos if pos2 != pos]
+      l1 = sum(w2v.wv.syn0[:, word2indices], 2)
+      if ~isempty(word2indices) && w2v.cbowmean > 0
+        l1 /= length(word2indices)
+      end
+
+      train_cbow_pair!(w2v, word, word2indices, l1, alpha)
+    end
+    result += length(wordvocabs)
+  end
+
+  return result
+end
+
+function train_cbow_pair!(w2v::Word2Vec, word::Vocab, word2indices::Vector{Int}, l1::Array{Float64}, alpha::Float64)
+  learnhidden = true
+  learnvectors = true
+  neu1e = zeros(l1)
+
+  # only negative
+  wordindices = [word.vindex]
+  while length(wordindices) < w2v.negative + 1
+    w = searchsortedfirst(w2v.cumtable, rand(w2v.random, 0:w2v.cumtable[end]))
+    if w != word.vindex
+      push!(wordindices, w)
+    end
+  end
+  l2b = w2v.syn1neg[:, wordindices]
+  fb = logistic(sum(l1' .* l2b')) # propogate hidden to output
+  gb = (w2v.neglabels - fb) * alpha
+  if learnhidden
+    l2b2 = w2v.syn1neg[:, wordindices]
+    BLAS.gemm!('N', 'T', 1.0, l1, gb, 1.0, l2b2)
+    w2v.syn1neg[:, wordindices] = l2b2
+  end
+  neu1e += sum(gb' .* l2b)
+
+  if learnvectors
+    if w2v.cbowmean == 0 && ~isempty(word2indices)
+      neu1e /= length(word2indices)
+    end
+    for i in word2indices
+      w2v.wv.syn0[:, i] += neu1e * w2v.syn0_lockf[i]
+    end
+  end
+  return neu1e
+end
+
 _raw_word_count(job) = sum(length(sentence) for sentence in job)
+
+function _do_train_job(w2v::Word2Vec, sentences::Vector{Vector{String}}, alpha::Float64, inits::NTuple{2, Vector{Float64}})
+  work, neu1 = inits
+  tally = 0
+  # no sg yet
+  tally += train_batch_cbow!(w2v, sentences, alpha, work, neu1)
+
+  return tally, _raw_word_count(sentences)
+end
 
 function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
   queuefactor = 2
   wordcount = 0
   if w2v.negative > 0
-    w2v.neglabels = zeros(w2v.negative + 1)
+    w2v.neglabels = zeros(Int, w2v.negative + 1)
     w2v.neglabels[1] = 1
   end
 
@@ -265,8 +335,7 @@ function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
     rawtally = 0
     for (_sentences, alpha) in jobs
       # do some stuff
-      tally += 1
-      rawtally += 10
+      tally, rawtally = _do_train_job(w2v, sentences, alpha, (work, neu1))
       put!(progressqueue, (length(_sentences), tally, rawtally))
       jobsprocessed += 1
     end
@@ -329,7 +398,7 @@ function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
     raw_word_count += raw_words
 
     # log progress
-    println("$examplecount $trained_word_count $raw_word_count")
+    # println("$examplecount $trained_word_count $raw_word_count")
     if ~isready(progressqueue)
       break
     end
