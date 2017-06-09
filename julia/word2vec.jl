@@ -51,7 +51,7 @@ mutable struct Word2Vec
   random::MersenneTwister
 end
 
-function Word2Vec(sentences::Vector{Vector{String}}, sz::Int = 100, alpha::Float64 = 0.025, window::Int = 1, mincount::Int = 1, maxvocabsize::Int = -1,
+function Word2Vec(sentences::Vector{Vector{String}}, sz::Int = 100, alpha::Float64 = 0.025, window::Int = 3, mincount::Int = 1, maxvocabsize::Int = -1,
                   sample::Float64 = 1e-3, seed::Int = 1, workers::Int = 3, minalpha::Float64 = 0.0001, sg::Int = 0, hs::Int = 0, negative::Int = 5,
                   cbowmean::Int = 1, iterations::Int = 5, nullword::Int = 0, sortedvocab::Int = 1, batchwords::Int = 5)
 
@@ -107,7 +107,7 @@ function make_cum_table!(w2v::Word2Vec)
 end
 
 function seededvector(w2v::Word2Vec, seedstring::String)
-  mt = MersenneTwister(hash(string) & 0xffffffff)
+  mt = MersenneTwister(hash(string)) # & 0xffffffff)
   return (rand(mt, w2v.vectorsize) - 0.5) / w2v.vectorsize
 end
 
@@ -178,7 +178,7 @@ function scalevocab!(w2v::Word2Vec)
   retain_pct = retain_total * 100 / max(original_total, 1)
 
   # precalculate each vocab item's threshold for sampling
-  threshold_count = retain_total
+  threshold_count = w2v.sample * retain_total
 
   downsample_total = downsample_unique = 0
   for i in eachindex(retain_words)
@@ -198,7 +198,7 @@ function scalevocab!(w2v::Word2Vec)
   # delete the raw vocab
   w2v.rawvocab = DefaultDict{String, Int}(0)
 
-  return Dict{String, Int}("dropunique" => dropunique, "retain_total" => retain_total, "downsample_unique" => downsample_unique, "downsample_total" => downsample_total)
+  return Dict{String, Int}("dropunique" => dropunique, "retain_total" => retain_total, "downsample_unique" => downsample_unique, "downsample_total" => floor(Int, downsample_total))
 end
 
 function sortvocab!(w2v::Word2Vec)
@@ -243,7 +243,8 @@ function train_batch_cbow!(w2v::Word2Vec, sentences::Vector{Vector{String}}, alp
       word = wordvocabs[pos]
       reducedwindow = rand(w2v.random, 0:w2v.window-1)
       _start = max(1, pos - w2v.window + reducedwindow)
-      iter = _start:(pos-1 + w2v.window - reducedwindow)
+      _end = min(length(wordvocabs), pos-1 + w2v.window - reducedwindow)
+      iter = _start:_end
       windowpos = zip(wordvocabs[iter], iter)
       word2indices = [word2.vindex for (word2, pos2) in windowpos if pos2 != pos]
       l1 = sum(w2v.wv.syn0[:, word2indices], 2)
@@ -304,6 +305,63 @@ function _do_train_job(w2v::Word2Vec, sentences::Vector{Vector{String}}, alpha::
   return tally, _raw_word_count(sentences)
 end
 
+function train2!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
+  wordcount = 0
+  if w2v.negative > 0
+    w2v.neglabels = zeros(Int, w2v.negative + 1)
+    w2v.neglabels[1] = 1
+  end
+
+  startalpha = w2v.alpha
+  endalpha = w2v.minalpha
+
+  if epochs > 1
+    sentences = repeat(w2v.sentences, outer=[epochs])
+    totalexamples = totalexamples * epochs
+  else
+    sentences = w2v.sentences
+  end
+
+  examplecount, trained_word_count, raw_word_count = 0, 0, wordcount
+
+  pushedwords, pushedexamples = 0, 0
+  nextalpha = startalpha
+  w2v.min_alpha_yet_reached = nextalpha
+  job_batch, batchsize = Vector{Vector{String}}(), 0
+  work = zeros(w2v.layer1size)
+  neu1 = zeros(w2v.layer1size)
+  for sent_idx in eachindex(sentences)
+    sentence = sentences[sent_idx]
+    sentence_length = _raw_word_count([sentence])
+
+    # will sentence fit
+    if batchsize + sentence_length <= w2v.batchwords
+      push!(job_batch, sentence)
+      batchsize += sentence_length
+    else
+      tally, rawtally = _do_train_job(w2v, job_batch, nextalpha, (work, neu1))
+
+      # update progress stats
+      examplecount += length(job_batch)
+      trained_word_count += tally
+      raw_word_count += rawtally
+
+      # update learning rate for next job
+      if endalpha < nextalpha
+        # total examples for now
+        pushedexamples += length(job_batch)
+        progress = 1.0 * pushedexamples / totalexamples
+
+        nextalpha = startalpha - (startalpha - endalpha) * progress
+        nextalpha = max(endalpha, nextalpha)
+      end
+      job_batch, batchsize = [sentence], sentence_length
+    end
+  end
+  w2v.traincount += 1
+  return trained_word_count
+end
+
 function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
   queuefactor = 2
   wordcount = 0
@@ -335,7 +393,7 @@ function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
     rawtally = 0
     for (_sentences, alpha) in jobs
       # do some stuff
-      tally, rawtally = _do_train_job(w2v, sentences, alpha, (work, neu1))
+      tally, rawtally = _do_train_job(w2v, _sentences, alpha, (work, neu1))
       put!(progressqueue, (length(_sentences), tally, rawtally))
       jobsprocessed += 1
     end
@@ -365,7 +423,7 @@ function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
         if endalpha < nextalpha
           # total examples for now
           pushedexamples += length(job_batch)
-          progress = 1.0 * pushedwords / totalexamples
+          progress = 1.0 * pushedexamples / totalexamples
 
           nextalpha = startalpha - (startalpha - endalpha) * progress
           nextalpha = max(endalpha, nextalpha)
@@ -398,7 +456,7 @@ function train!(w2v::Word2Vec, totalexamples::Int, epochs::Int)
     raw_word_count += raw_words
 
     # log progress
-    # println("$examplecount $trained_word_count $raw_word_count")
+    println("$examplecount $trained_word_count $raw_word_count")
     if ~isready(progressqueue)
       break
     end
