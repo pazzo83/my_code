@@ -115,3 +115,49 @@ end
 macro NTable(expr...)
   return make_table(collect(expr))
 end
+
+ncols(ntbl::NamedTable) = length(fieldnames(ntbl))
+
+columns(ntbl::NamedTable) = [ntbl[col] for col in fieldnames(ntbl)]
+
+Base.length(ntbl::NamedTable) = length(ntbl[fieldnames(ntbl)[1]])
+Base.getindex(ntbl::NamedTable, s::Symbol) = getfield(ntbl, s)
+
+function Base.getindex(ntbl::NamedTable, i::Int)
+  typ = typeof(ntbl)
+  fields = Any[]
+  for col in fieldnames(ntbl)
+    push!(fields, [getfield(ntbl, col)[i]])
+  end
+  return typ(fields...)
+end
+
+# from IndexedTables.jl
+filt_by_col!(f, col, indxs) = filter!(i->f(col[i]), indxs)
+function Base.select(ntbl::NT, conditions::Pair...) where {NT <: NamedTable}
+  indxs = [1:length(ntbl);]
+  for (c, f) in conditions
+    filt_by_col!(f, ntbl[c], indxs)
+  end
+  return NT(map(x -> x[indxs], columns(ntbl))...)
+end
+
+function Base.show(io::IO, ntbl::NamedTable)
+  n = length(ntbl)
+  rows = n > 20 ? [1:10; (n-9):n] : [1:n;]
+  nc = ncols(ntbl)
+  reprs = [ sprint(io -> showcompact(io, ntbl[col][i])) for i in rows, col in fieldnames(ntbl)]
+  names = map(string, fieldnames(ntbl))
+  widths = [ max(strwidth(names[c]), maximum(map(strwidth, reprs[:, c]))) for c in 1:nc ]
+  for c in 1:nc
+    print(io, rpad(names[c], widths[c] + (c == nc ? 1 : 2), " "))
+  end
+  println(io)
+  print(io, "─"^(sum(widths)+2*nc-1))
+  for r in 1:size(reprs, 1)
+    println(io)
+    for c in 1:nc
+      print(io, c == nc ? reprs[r, c] : rpad(reprs[r, c], widths[c] + 2, " "))
+    end
+  end
+end
