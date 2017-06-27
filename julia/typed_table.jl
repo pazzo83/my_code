@@ -1,4 +1,5 @@
-abstract type NamedTable end
+abstract type NamedTable{T} end
+abstract type NamedRow end
 
 struct ParseNode{T} end
 
@@ -60,21 +61,62 @@ function gen_namedtable_ctor_body(n::Int, args)
   end
 end
 
-@generated function (::Type{NT}){NT <: NamedTable}(args...)
+function gen_namedrow_ctor_body(n::Int, args)
+  types = [ :(typeof($x)) for x in args ]
+  cnvt = [ :(convert(fieldtype(TT, $x), $(args[x]))) for x = 1:n ]
+  if n == 0
+    texpr = :T
+  else
+    texpr = :(NR{$(types...)})
+  end
+  tcond = :(isa(NR, UnionAll))
+  quote
+    if $tcond
+      TT = $texpr
+    else
+      TT = NT
+    end
+    if nfields(TT) !== $n
+      throw(ArgumentError("wrong number of args"))
+    end
+
+    $(Expr(:new, :TT, cnvt...))
+  end
+end
+
+@generated function (::Type{NT})(args...) where NT <: NamedTable{T} where T
   n = length(args)
   aexprs = [ :(args[$i]) for i = 1:n ]
   return gen_namedtable_ctor_body(n, aexprs)
 end
 
+@generated function (::Type{NR})(args...) where NR <: NamedRow
+  n = length(args)
+  aexprs = [ :(args[$i]) for i = 1:n ]
+
+  return gen_namedrow_ctor_body(n, aexprs)
+end
+
+function create_namedrow_type(types::Vector{Symbol}, tfields::Vector{Expr}, rowname::Symbol)
+  mod = current_module()
+  rowexpr = Expr(:curly, rowname, types...)
+  def = Expr(:type, false, Expr( :(<:), rowexpr, GlobalRef(Main, :NamedRow)), Expr(:block, tfields..., Expr(:tuple)))
+  eval(mod, def)
+
+  return getfield(mod, rowname)
+end
+
 function create_namedtable_type(fields::Vector{Symbol})
   mod = current_module()
   escaped_fieldnames = [replace(string(i), "_", "__") for i in fields]
-  name = Symbol( string("_NT_", join(escaped_fieldnames, "_")) )
+  name = Symbol( string("_NTable_", join(escaped_fieldnames, "_")) )
+  rowname = Symbol( string("_NRow_", join(escaped_fieldnames, "_")) )
   if !isdefined(mod, name)
     len = length(fields)
     types = [Symbol("T$n") for n = 1:len]
     tfields = [ Expr(:(::), Symbol( fields[n] ), Symbol( "T$n" )) for n = 1:len]
-    def = Expr(:type, true, Expr( :(<:), Expr(:curly, name, types...), GlobalRef(Main, :NamedTable)), Expr(:block, tfields..., Expr(:tuple)))
+    rownametype = create_namedrow_type(types, tfields, rowname)
+    def = Expr(:type, true, Expr( :(<:), Expr(:curly, name, types...), Expr(:curly, GlobalRef(Main, :NamedTable), rowname)), Expr(:block, tfields..., Expr(:tuple)))
     eval(mod, def)
   end
   return getfield(mod, name)
@@ -161,3 +203,6 @@ function Base.show(io::IO, ntbl::NamedTable)
     end
   end
 end
+
+test_some_stuff(::NamedTable{T}) where T = T
+# test_do_rows(tbl::NamedTable{T}) where T = []
