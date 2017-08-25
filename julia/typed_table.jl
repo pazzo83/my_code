@@ -1,3 +1,5 @@
+using DataStructures
+
 abstract type NamedTable{T} end
 abstract type NamedRow end
 
@@ -20,6 +22,10 @@ function trans(::Type{ParseNode{:(::)}}, expr::Expr)
   else
     return (nothing, expr.args[1], nothing)
   end
+end
+
+function trans(::Type{ParseNode{:vect}}, expr::Expr)
+  return (expr.args, nothing, nothing)
 end
 
 function trans(expr::Expr)
@@ -122,14 +128,25 @@ function create_namedtable_type(fields::Vector{Symbol})
   return getfield(mod, name)
 end
 
-function make_table(exprs::Vector)
+function process_table_args(::Type{ParseNode{:vect}}, exprs::Vector{Expr})
+  sym, typ, val = trans(exprs[1])
+  if length(sym) != length(exprs[2:end])
+    error("Wrong number of columns")
+  end
+  fields = map(Symbol, sym)
+  values = [escape(x) for x in exprs[2:end]]
+
+  return fields, values, Array{Any}(length(exprs)), true
+end
+
+function process_table_args(::Union{Type{ParseNode{:(=)}}, Type{ParseNode{:kw}}, Type{ParseNode{:(::)}}}, exprs::Vector{Expr})
   len     = length(exprs)
   fields  = Array{Symbol}(len)
   values  = Array{Any}(len)
   typs    = Array{Any}(len)
 
   construct = false
-
+  
   for i in eachindex(exprs)
     expr = exprs[i]
     sym, typ, val = trans(expr)
@@ -141,11 +158,15 @@ function make_table(exprs::Vector)
     typs[i] = typ
     values[i] = ( typ != nothing ) ? Expr(:call, :convert, typ, val) : val
   end
+  return fields, values, typs, construct
+end
 
+function make_table(exprs::Vector{Expr})
+  fields, values, typs, construct = process_table_args(ParseNode{exprs[1].head}, exprs)
   ty = create_namedtable_type(fields)
 
   if ~construct
-    if len == 0
+    if length(exprs) == 0
       return ty
     end
     return Expr( :curly, ty, typs...)
@@ -154,8 +175,25 @@ function make_table(exprs::Vector)
   end
 end
 
-macro NTable(expr...)
+function make_table(colnames::Symbol, cols)
+  
+  ty = create_namedtable_type(eval(colnames))
+
+  return Expr(:call, ty, eval(cols)...)
+end
+
+macro NTable(expr::Expr...)
   return make_table(collect(expr))
+end
+
+macro NTable(sym::Symbol, expr)
+  return make_table(sym, expr)
+end
+
+@generated function ith_all(i, n::NamedTable)
+    Expr(:block,
+         :(@Base._inline_meta),
+         Expr(:tuple, [ Expr(:ref, Expr(:., :n, Expr(:quote, fieldname(n,f))), :i) for f = 1:nfields(n) ]...))
 end
 
 ncols(ntbl::NamedTable) = length(fieldnames(ntbl))
@@ -164,15 +202,18 @@ columns(ntbl::NamedTable) = [ntbl[col] for col in fieldnames(ntbl)]
 
 Base.length(ntbl::NamedTable) = length(ntbl[fieldnames(ntbl)[1]])
 Base.getindex(ntbl::NamedTable, s::Symbol) = getfield(ntbl, s)
+Base.values(nrow::NamedRow) = [ getfield(nrow, i) for i in 1:nfields(nrow) ]
 
-function Base.getindex(ntbl::NamedTable, i::Int)
-  typ = typeof(ntbl)
-  fields = Any[]
-  for col in fieldnames(ntbl)
-    push!(fields, [getfield(ntbl, col)[i]])
-  end
-  return typ(fields...)
-end
+# function Base.getindex(ntbl::NamedTable, i::Int)
+#   typ = typeof(ntbl)
+#   fields = Any[]
+#   for col in fieldnames(ntbl)
+#     push!(fields, [getfield(ntbl, col)[i]])
+#   end
+#   return typ(fields...)
+# end
+Base.getindex(ntbl::NamedTable{T}, i::Int) where T = T(ith_all(i, ntbl)...)
+Base.getindex(ntbl::NT, v::Vector{Int}) where {NT <: NamedTable} = NT(map(x -> x[v], columns(ntbl))...)
 
 # from IndexedTables.jl
 filt_by_col!(f, col, indxs) = filter!(i->f(col[i]), indxs)
@@ -202,6 +243,68 @@ function Base.show(io::IO, ntbl::NamedTable)
       print(io, c == nc ? reprs[r, c] : rpad(reprs[r, c], widths[c] + 2, " "))
     end
   end
+end
+
+function Base.show(io::IO, nrow::NamedRow)
+    print(io, "(")
+    first = true
+    for (k, v) in zip(fieldnames(nrow), values(nrow))
+        !first && print(io, ", ")
+        print(io, k, " = "); show(io, v)
+        first = false
+    end
+    print(io, ")")
+end
+
+function build_row_map(col::Vector{T}) where T
+    # colmap = Dict{T, Int}()
+    colmap = DefaultDict{T, Vector{Int}}(() -> Int[])
+    
+    for i in eachindex(col)
+        push!(colmap[col[i]], i)
+    end
+    return colmap
+end
+
+function testjoin(ntbl1::NamedTable, ntbl2::NamedTable, on::Symbol)
+    map1 = build_row_map(ntbl1[on])
+    map2 = build_row_map(ntbl2[on])
+    
+    set1 = Set(keys(map1))
+    set2 = Set(keys(map2))
+
+    intersectmap = intersect(set1, set2)
+    tbl1indices = Vector{Int}()
+    tbl2indices = Vector{Int}()
+    for val in intersectmap
+        tbl1vals = map1[val]
+        tbl2vals = map2[val]
+        lenghttouse = min(length(tbl1vals), length(tbl2vals))
+        append!(tbl1indices, tbl1vals[1:lenghttouse])
+        append!(tbl2indices, tbl2vals[1:lenghttouse])
+    end
+    sortindices = sortperm(tbl1indices)
+    tbl1indices = tbl1indices[sortindices]
+    tbl2indices = tbl2indices[sortindices]
+
+    # now we have to create the joined tbl type
+    tblfields = fieldnames(ntbl1)
+    tbl2fields = fieldnames(ntbl2)
+    for v in tbl2fields
+        if v != on
+            if v in tblfields
+                symbv = Symbol("$(v)1")
+            else
+                symbv = v
+            end
+            push!(tblfields, symbv)
+        end
+    end
+    NT = create_namedtable_type(tblfields)
+    tbl2colsindicies = [i for i in eachindex(tbl2fields) if tbl2fields[i] != on]
+    #fulltblcols = vcat(map(x -> x[tbl1indices], columns(ntbl1)), map(y -> y[tbl2indices], columns(ntbl2)[tbl2colsindicies]))
+
+    return NT(map(x -> x[tbl1indices], columns(ntbl1))..., map(y -> y[tbl2indices], columns(ntbl2)[tbl2colsindicies])...)
 end
 
 test_some_stuff(::NamedTable{T}) where T = T
